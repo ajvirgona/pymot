@@ -75,7 +75,7 @@ class MOTEvaluation:
 
         if len(hypotheses_frames) == 0:
 #            write_stderr_red("Warning:", "No hypothesis timestamp found for timestamp %f with sync delta %f" % (timestamp, self.sync_delta_))
-            return {"hypotheses": []} # empty list of hypos
+            return None # return none to signal the frame was not matched
         
         return hypotheses_frames[0] # return first and only element of list
 
@@ -93,7 +93,13 @@ class MOTEvaluation:
 
         timestamp = frame["timestamp"]
         groundtruths = frame["annotations"]
-        hypotheses = self.get_hypotheses_frame(timestamp)["hypotheses"]
+        hyp_frame = self.get_hypotheses_frame(timestamp)
+        hypotheses = []
+        frame_matched = False
+
+        if hyp_frame:
+            frame_matched = True
+            hypotheses = hyp_frame["hypotheses"]
 
         visualDebugAnnotations = []
 
@@ -161,6 +167,8 @@ class MOTEvaluation:
                 listofprints.append("DIFF Keep corr %s %s %.2f" % (groundtruth[0]["id"], hypothesis[0]["id"], Rect(groundtruth[0]).overlap(Rect(hypothesis[0]))))
                 correspondences[gt_id] = hypothesis[0]["id"]
                 self.total_overlap_ += overlap
+                if frame_matched:
+                    self.total_overlap_in_matched_frames_ += overlap
 
         
         for p in sorted(listofprints):
@@ -236,7 +244,8 @@ class MOTEvaluation:
             correspondencelist.append("DIFF correspondence %s %s" % (gt_id, hypo_id))
             correspondences[gt_id] = hypo_id
             self.total_overlap_ += overlap
-            
+            if frame_matched:
+                self.total_overlap_in_matched_frames_ += overlap
 
             # Count "recoverable" and "non-recoverable" mismatches
             # "recoverable" mismatches
@@ -281,6 +290,10 @@ class MOTEvaluation:
                         LOG.info("Correspondence %s-%s contradicts mapping %s-%s. Counting as mismatch and updating mapping." % (gt_id, hypo_id, mapping_gt_id, mapping_hypo_id))
                         mismatcheslist.append("DIFF Mismatch %s-%s -> %s-%s" % (mapping_gt_id, mapping_hypo_id, gt_id, hypo_id))
                         self.mismatches_ = self.mismatches_ + 1
+
+                        # Matched frame only count
+                        if frame_matched:
+                            self.mismatches_in_matched_frames_ = self.mismatches_in_matched_frames_ + 1
 
                         # find groundtruth and hypothesis with given ids
                         g = filter(lambda g: g["id"] == gt_id, groundtruths)
@@ -348,6 +361,10 @@ class MOTEvaluation:
                 groundtruth["class"] = "miss"
                 visualDebugAnnotations.append(groundtruth)
                 self.misses_ += 1
+                # Matched frame only count
+                if frame_matched:
+                    self.misses_in_matched_frames_ += 1
+
 
         # Count false positives
         for hypothesis in hypotheses:
@@ -355,12 +372,17 @@ class MOTEvaluation:
                 LOG.info("False positive: %s" % hypothesis["id"])
                 LOG.info("DIFF False positive %s" % hypothesis["id"])
                 self.false_positives_ += 1
+                if frame_matched:
+                    self.false_positives_in_matched_frames_ += 1
                 visualDebugAnnotations.append(hypothesis)
                 hypothesis["class"] = "false positive"
         
         self.total_correspondences_ += len(correspondences)
-        
         self.total_groundtruths_ += len(groundtruths) # Number of objects (ground truths) in current frame
+
+        if frame_matched:
+            self.total_correspondences_in_matched_frames_ += len(correspondences)
+            self.total_groundtruths_in_matched_frames_ += len(groundtruths)  # Number of objects (ground truths) in current frame
 
         visualDebugFrame = {
             "timestamp": timestamp,
@@ -416,6 +438,17 @@ class MOTEvaluation:
 
         return mota
 
+    def getMOTAMatchedFrames(self):
+        mota = 0.0
+        if self.total_groundtruths_in_matched_frames_ == 0:
+            write_stderr_red("Warning", "No ground truth. MOTA calculation not possible")
+        #            raise("No ground truth. MOTA calculation not possible")
+        else:
+            mota = 1.0 - float(self.misses_in_matched_frames_ +
+                               self.false_positives_in_matched_frames_ +
+                               self.mismatches_in_matched_frames_) / float(self.total_groundtruths_in_matched_frames_)
+
+        return mota
 
     def getMOTP(self):
         motp = 0.0
@@ -426,6 +459,14 @@ class MOTEvaluation:
             motp = self.total_overlap_ / self.total_correspondences_
         return motp
 
+    def getMOTPMatchedFrames(self):
+        motp = 0.0
+        if self.total_correspondences_in_matched_frames_ == 0:
+            write_stderr_red("Warning", "No correspondences found. MOTP calculation not possible")
+        #            raise("No correspondence found. MOTP calculation not possible")
+        else:
+            motp = self.total_overlap_in_matched_frames_ / self.total_correspondences_in_matched_frames_
+        return motp
 
     def getAbsoluteStatistics(self):
         lonely_ground_truths = self.groundtruth_ids_ - set(self.gt_map_.keys())
@@ -458,6 +499,8 @@ class MOTEvaluation:
         return {
             "MOTA":                 self.getMOTA(),
             "MOTP":                 self.getMOTP(),
+            "MOTA-MF":              self.getMOTAMatchedFrames(),
+            "MOTP-MF":              self.getMOTPMatchedFrames(),
             "miss rate":            float(self.misses_) / gt,
             "false positive rate":  float(self.false_positives_) / gt,
             "mismatch rate":        float(self.mismatches_) / gt,
@@ -495,7 +538,8 @@ class MOTEvaluation:
         print ""
         print "MOTP", self.getMOTP()
         print "MOTA", self.getMOTA()
-        
+        print "MOTP-MF", self.getMOTPMatchedFrames()
+        print "MOTA-MF", self.getMOTAMatchedFrames()
 
     def printLegacyFormat(self):
         """Print out as expected by score_all tool."""
@@ -550,6 +594,14 @@ class MOTEvaluation:
 
         self.groundtruth_ids_ = set()
         self.hypothesis_ids_ = set()
+
+        # Separate counts for ignoring missed frames
+        self.mismatches_in_matched_frames_ = 0
+        self.misses_in_matched_frames_ = 0
+        self.false_positives_in_matched_frames_ = 0
+        self.total_groundtruths_in_matched_frames_ = 0
+        self.total_overlap_in_matched_frames_ = 0.0
+        self.total_correspondences_in_matched_frames_ = 0
 
 
 if __name__ == "__main__":
